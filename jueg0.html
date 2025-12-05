@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Gatito Guardián - Edición Legendaria (Corregido)</title>
+<style>
+  :root{
+    --w:900px; --h:560px;
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+  }
+  *{box-sizing:border-box; user-select:none;}
+  body{
+    margin:0; min-height:100vh;
+    display:flex; align-items:center; justify-content:center;
+    background:linear-gradient(#05060a,#10121a 60%);
+    font-family:var(--font);
+    color:#fff;
+    padding:18px;
+  }
+
+  .wrap{
+    width:var(--w); max-width:95vw;
+    display:flex; flex-direction:column; align-items:center;
+  }
+
+  #game{
+    width:var(--w); height:var(--h);
+    border-radius:12px; overflow:hidden;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.6), 0 2px 0 rgba(0,0,0,0.4);
+    background:#071022;
+  }
+
+  .controls{
+    width:100%; display:flex; justify-content:space-between; align-items:center;
+    margin-top:12px;
+  }
+
+  #shootBtn{
+    background: linear-gradient(#ffd84d,#ffb800);
+    border:0; border-radius:12px; padding:12px 22px;
+    font-weight:700; font-size:18px; color:#222;
+    box-shadow:0 6px 0 #c08900;
+    touch-action:manipulation;
+  }
+
+  .hud-mini{
+    display:flex; gap:12px; align-items:center;
+  }
+
+  .stat{
+    background:rgba(255,255,255,0.06);
+    padding:8px 12px; border-radius:10px; font-weight:600; font-size:14px;
+  }
+
+  #message{
+    margin-top:10px; font-size:14px; min-height:18px; opacity:0.9;
+  }
+
+  /* mobile friendly: enlarge button on small screens */
+  @media(max-width:600px){
+    #shootBtn{ padding:16px 26px; font-size:20px; border-radius:14px;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="game" width="900" height="560"></canvas>
+
+  <div class="controls">
+    <div class="hud-mini">
+      <div class="stat" id="scoreStat">Puntaje: 0</div>
+      <div class="stat" id="levelStat">Nivel: 1</div>
+      <div class="stat" id="hpStat">Casa: ❤️❤️❤️</div>
+      <div class="stat" id="comboStat">Combo: x1</div>
+    </div>
+    <button id="shootBtn">MANTENER PARA RAYO ⚡</button>
+  </div>
+
+  <div id="message">Objetivo: Defiende la casita del gatito. Mantén presionado el botón para disparar el rayo amarillo.</div>
+</div>
+
+<script>
+/* Gatito Guardián - Edición Legendaria (correcciones)
+   - Se solucionan condiciones que podían congelar el juego al matar enemigos.
+   - Mejora en manejo de borrado de enemigos, optimizaciones de draw y correcciones de estilo canvas.
+*/
+
+// Canvas setup
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// Controls & HUD
+const shootBtn = document.getElementById('shootBtn');
+const scoreStat = document.getElementById('scoreStat');
+const levelStat = document.getElementById('levelStat');
+const hpStat = document.getElementById('hpStat');
+const comboStat = document.getElementById('comboStat');
+
+let mouseX = W * 0.6, mouseY = H * 0.5;
+let laserActive = false;
+let lastShotTime = 0;
+
+// Cat & house positions
+const houseX = 30, houseY = H/2 - 60;
+const catX = houseX + 80, catY = H/2 - 40;
+const CAT_EMOJI = '😼';
+const HOUSE_EMOJI = '🏠';
+
+// Game state
+let score = 0;
+let level = 1;
+let houseHP = 3; // lives
+let combo = 1;
+let comboTimer = 0;
+let running = true;
+let spawnRate = 1400; // ms initial
+let elapsed = 0;
+let difficultyTimer = 0;
+
+// Entities
+let enemies = []; // {id,type,x,y,dx,hp,extra}
+let particles = []; // {x,y,vx,vy,life,age,color,radius}
+let explosions = []; // visual bursts
+
+let enemyId = 0;
+
+// Types: define behaviors and properties
+const ENEMY_TYPES = {
+  weak:      {name:'Basura',        hp:1,  speed:1.2, score:1, behavior:'straight', color:'#9ea3a6'},
+  toxic:     {name:'Bolsas tóxicas',hp:1,  speed:2.4, score:2, behavior:'fast', color:'#6fbf3f'},
+  incendiary:{name:'Incendiada',    hp:1,  speed:1.4, score:2, behavior:'explodeOnDeath', color:'#ff6b3d'},
+  recycle:   {name:'Reciclable',    hp:1,  speed:1.0, score:3, behavior:'straight', color:'#4dd0e1'},
+  mutant:    {name:'Mutante',       hp:1,  speed:1.6, score:3, behavior:'zigzag', color:'#b26ff0'},
+  heavy:     {name:'Pesada',        hp:3,  speed:0.7, score:5, behavior:'heavy', color:'#7a7a7a'}
+};
+
+// Difficulty progression levels (spawn weights)
+function chooseEnemyType(progress){
+  const weights = {
+    weak:  Math.max(0.5 - progress*0.2, 0.2),
+    toxic: Math.min(0.1 + progress*0.25, 0.3),
+    incendiary: Math.min(0.08 + progress*0.2, 0.2),
+    recycle: Math.max(0.08 + progress*0.15, 0.1),
+    mutant: Math.min(0.06 + progress*0.18, 0.18),
+    heavy: Math.min(0.02 + progress*0.22, 0.14)
+  };
+  const total = Object.values(weights).reduce((a,b)=>a+b,0);
+  let pick = Math.random()*total;
+  for(const k in weights){
+    pick -= weights[k];
+    if(pick <= 0) return k;
+  }
+  return 'weak';
+}
+
+// Spawn enemy
+function spawnEnemy(){
+  const progress = Math.min(1, elapsed / 900000);
+  const typeKey = chooseEnemyType(progress);
+  const type = ENEMY_TYPES[typeKey];
+  const y = 40 + Math.random()*(H - 120);
+  let e = {
+    id: ++enemyId,
+    type: typeKey,
+    x: W + 60,
+    y,
+    dx: type.speed * (1 + Math.random()*0.2),
+    hp: type.hp,
+    maxHp: type.hp,
+    color: type.color,
+    behavior: type.behavior,
+    wobble: Math.random()*1000,
+    zigDir: Math.random()<0.5?1:-1,
+    size: 44 + (typeKey==='heavy'?18:0),
+    scoreValue: type.score,
+    _dead: false
+  };
+  enemies.push(e);
+}
+
+// Basic background city parallax layers
+const city = {
+  stars: [],
+  layers: []
+};
+function initCity(){
+  for(let i=0;i<60;i++){
+    city.stars.push({
+      x: Math.random()*W,
+      y: Math.random()*H*0.6,
+      r: Math.random()*1.6+0.3,
+      alpha: 0.3 + Math.random()*0.7,
+      phase: Math.random()*Math.PI*2
+    });
+  }
+  const colors = ['#0b1220','#0f1a2b','#122033'];
+  for(let l=0;l<3;l++){
+    const layer = [];
+    let x=0;
+    while(x < W+200){
+      const bw = 40 + Math.random()*120;
+      const bh = 60 + Math.random()*(H*0.5);
+      layer.push({x:x, y:H-80-bh, w:bw, h:bh, color: colors[l], glow: Math.random()>0.7, seed: Math.random()*1000});
+      x += bw + (20 + Math.random()*40);
+    }
+    city.layers.push({items:layer, speed: 0.2 + l*0.25});
+  }
+}
+initCity();
+
+// PARTICLES helper
+function spawnParticles(x,y,color,count=12,spread=2,life=500){
+  for(let i=0;i<count;i++){
+    const angle = Math.random()*Math.PI*2;
+    const speed = Math.random()*3*spread;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle)*speed,
+      vy: Math.sin(angle)*speed,
+      life: life + Math.random()*200,
+      age:0,
+      color,
+      r:1 + Math.random()*3
+    });
+  }
+}
+
+// Explosion visual
+function spawnExplosion(x,y,size,color){
+  explosions.push({x,y,size,life:450,age:0,color});
+  spawnParticles(x,y,color, 14 + Math.floor(size/6), 1.4, 350);
+}
+
+// Sound: simple WebAudio synth for laser and hit
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+let audioCtx = null;
+function ensureAudio(){
+  if(!audioCtx) {
+    try {
+      audioCtx = new AudioCtx();
+    } catch(e){
+      // Silently ignore if audio not available
+      audioCtx = null;
+    }
+  }
+}
+function playLaserTone(){
+  if(!audioCtx) return;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'sine';
+  o.frequency.value = 950;
+  g.gain.value = 0.02;
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start();
+  g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.06);
+  o.stop(audioCtx.currentTime + 0.07);
+}
+function playHitTone(){
+  if(!audioCtx) return;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'triangle';
+  o.frequency.value = 260 + Math.random()*120;
+  g.gain.value = 0.04;
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start();
+  g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.12);
+  o.stop(audioCtx.currentTime + 0.14);
+}
+
+// Utility: distance to line segment (A->B) from point P
+function distPointToSegment(px,py,ax,ay,bx,by){
+  const vx = bx - ax, vy = by - ay;
+  const wx = px - ax, wy = py - ay;
+  const c1 = vx*wx + vy*wy;
+  if(c1 <= 0) return Math.hypot(px-ax, py-ay);
+  const c2 = vx*vx + vy*vy;
+  if(c2 <= c1) return Math.hypot(px-bx, py-by);
+  const t = c1 / c2;
+  const projx = ax + t*vx, projy = ay + t*vy;
+  return Math.hypot(px-projx, py-projy);
+}
+
+// Laser collision logic: line from cat center to mouse pos, solid yellow
+function damageEnemiesWithLaser(){
+  if(!laserActive) return;
+  const ax = catX + 32, ay = catY + 26;
+  const maxRange = Math.hypot(W, H)*1.2;
+  let dx = mouseX - ax, dy = mouseY - ay;
+  const len = Math.hypot(dx,dy) || 1;
+  dx /= len; dy /= len;
+  const bx = ax + dx * maxRange, by = ay + dy * maxRange;
+
+  const laserThickness = 10;
+  let anyHit = false;
+
+  // Collect dead enemy ids to remove after processing, to avoid mutating while iterating
+  const deadIds = new Set();
+
+  for(let i=enemies.length-1;i>=0;i--){
+    const e = enemies[i];
+    if(e._dead) continue;
+    const cx = e.x + e.size*0.5, cy = e.y + e.size*0.5;
+    const d = distPointToSegment(cx,cy,ax,ay,bx,by);
+    if(d < e.size*0.5 + laserThickness){
+      const dmg = 0.08 * (1 + (level-1)*0.05) * (e.type==='heavy'?0.6:1);
+      e.hp -= dmg;
+      anyHit = true;
+      if(Math.random() < 0.18) spawnParticles(cx, cy, '#ffd24d', 3, 0.6, 220);
+      if(e.hp <= 0 && !deadIds.has(e.id)){
+        // Mark dead and run death effects (but do not splice here)
+        deadIds.add(e.id);
+        e._dead = true;
+
+        // scoring & combo
+        const val = e.scoreValue + Math.floor(level/2);
+        score += val * combo;
+        combo = Math.min(10, combo + 0.4);
+        comboTimer = 1500;
+
+        // special behavior: incendiary explosion damage area
+        if(e.behavior === 'explodeOnDeath'){
+          spawnExplosion(e.x + e.size/2, e.y + e.size/2, 36, '#ff834d');
+          // apply area damage to others (safe even if we mark them dead here)
+          for(let j=0;j<enemies.length;j++){
+            const other = enemies[j];
+            if(!other || other._dead || other.id === e.id) continue;
+            const dx2 = (other.x - e.x), dy2 = (other.y - e.y);
+            const dist = Math.hypot(dx2,dy2);
+            if(dist < 90){
+              other.hp -= 1.2;
+              // if that kills it, mark for removal too
+              if(other.hp <= 0){
+                other._dead = true;
+                deadIds.add(other.id);
+                // small explosion for chained kills
+                spawnExplosion(other.x + other.size/2, other.y + other.size/2, 20, '#ffb86b');
+              }
+            }
+          }
+        } else {
+          spawnExplosion(e.x + e.size/2, e.y + e.size/2, 20 + e.size*0.3, '#ffd24d');
+        }
+        playHitTone();
+      }
+    }
+  }
+
+  // Remove dead enemies in a single pass (safe)
+  if(deadIds.size > 0){
+    enemies = enemies.filter(en => !deadIds.has(en.id));
+  }
+
+  if(anyHit && Math.random() < 0.08) playLaserTone();
+}
+
+// Enemy update behavior
+function updateEnemies(dt){
+  for(let i=enemies.length-1;i>=0;i--){
+    const e = enemies[i];
+    // behavior movement
+    if(e.behavior === 'straight'){
+      e.x -= e.dx * dt;
+    } else if(e.behavior === 'fast'){
+      e.x -= e.dx * dt * 1.6;
+    } else if(e.behavior === 'zigzag'){
+      e.x -= e.dx * dt;
+      e.y += Math.sin((e.wobble + elapsed*0.003) * 3) * 0.9 * e.zigDir;
+    } else if(e.behavior === 'heavy'){
+      e.x -= e.dx * dt * 0.8;
+    } else if(e.behavior === 'explodeOnDeath'){
+      e.x -= e.dx * dt;
+    }
+
+    // Out of bounds: reached the house -> damage and remove
+    if(e.x < houseX + 60){
+      houseHP -= 1;
+      spawnExplosion(houseX + 30, houseY + 40, 42, '#ff6b3d');
+      enemies.splice(i,1);
+      combo = 1;
+      if(houseHP <= 0){
+        gameOver();
+      } else {
+        updateHUD();
+      }
+    }
+  }
+}
+
+// update particles and explosions
+function updateParticles(dt){
+  for(let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy += 0.03 * dt; // gravity
+    p.age += dt*16;
+    if(p.age > p.life) particles.splice(i,1);
+  }
+  for(let i=explosions.length-1;i>=0;i--){
+    const ex = explosions[i];
+    ex.age += dt*16;
+    if(ex.age > ex.life) explosions.splice(i,1);
+  }
+}
+
+// spawn logic with progressive difficulty
+let lastSpawn = 0;
+function spawnController(now){
+  if(now - lastSpawn > spawnRate){
+    spawnEnemy();
+    lastSpawn = now;
+  }
+  difficultyTimer += now - (lastDifficultyTime || now);
+  lastDifficultyTime = now;
+  elapsed += now - (lastElapsed || now);
+  lastElapsed = now;
+
+  if(difficultyTimer > 8000){
+    difficultyTimer = 0;
+    level++;
+    spawnRate = Math.max(400, spawnRate - 90);
+    updateHUD();
+  }
+}
+
+// HUD
+function updateHUD(){
+  scoreStat.innerText = `Puntaje: ${Math.floor(score)}`;
+  levelStat.innerText = `Nivel: ${level}`;
+  hpStat.innerText = `Casa: ${'❤️'.repeat(Math.max(0,houseHP))}${'🤍'.repeat(Math.max(0,3-houseHP))}`;
+  comboStat.innerText = `Combo: x${combo.toFixed(1)}`;
+}
+
+// Draw city background
+function drawCity(dt){
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#07162b');
+  g.addColorStop(0.45,'#081827');
+  g.addColorStop(1,'#071022');
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,W,H);
+
+  // stars (simple pulsing)
+  for(const s of city.stars){
+    const pulse = 0.5 + 0.5*Math.sin((elapsed*0.002 + s.phase)*0.3);
+    ctx.globalAlpha = s.alpha * pulse;
+    ctx.fillStyle = '#bfe9ff';
+    ctx.beginPath();
+    ctx.arc((s.x + (elapsed*0.01) % W + W) % W, s.y, s.r, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // building layers
+  for(const layer of city.layers){
+    for(const b of layer.items){
+      const offset = (elapsed*0.02*layer.speed) % 120;
+      ctx.fillStyle = b.color;
+      ctx.fillRect(b.x - offset, b.y, b.w, b.h);
+
+      // windows: deterministic small glow pattern (cheap)
+      if(b.glow){
+        ctx.fillStyle = 'rgba(255,200,120,0.05)';
+        const cols = Math.max(1, Math.floor(b.w / 18));
+        const rows = Math.max(1, Math.floor(b.h / 18));
+        for(let i=0;i<cols;i++){
+          for(let j=0;j<rows;j++){
+            // deterministic flicker based on position/elapsed to avoid Math.random() inside loops
+            const flick = Math.abs(Math.sin((b.seed + i*7 + j*13 + elapsed*0.002)));
+            if(flick > 0.86) {
+              ctx.fillRect(b.x + i*18 - (elapsed*0.02)%6 - offset, b.y + j*18, 6, 6);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // smog layer (animated)
+  ctx.fillStyle = 'rgba(200,200,200,0.025)';
+  const smogOffset = (elapsed*0.03) % W;
+  for(let i=0;i<6;i++){
+    ctx.beginPath();
+    const y = 30 + i*40 + Math.sin((elapsed*0.001 + i)*1.5)*8;
+    ctx.ellipse((smogOffset + i*150) % (W+200) - 100, y, 220, 40 + i*6, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+}
+
+// Draw HUD / foreground (house, cat, enemies, laser, particles)
+function drawScene(dt){
+  // draw ground
+  ctx.fillStyle = '#091414';
+  ctx.fillRect(0, H-90, W, 90);
+
+  // House behind cat
+  ctx.font = '54px serif';
+  ctx.textBaseline = 'top';
+  ctx.fillText(HOUSE_EMOJI, houseX, houseY);
+
+  // Cat
+  ctx.font = '56px serif';
+  ctx.fillText(CAT_EMOJI, catX, catY);
+
+  // Draw enemies
+  for(const e of enemies){
+    ctx.save();
+    ctx.globalAlpha = 0.95;
+    ctx.font = `${e.size}px serif`;
+    // Use the emoji as base visual
+    ctx.fillText('🗑️', e.x, e.y - 2);
+    // tinted halo
+    ctx.globalAlpha = 0.18;
+    ctx.fillStyle = e.color;
+    ctx.beginPath();
+    ctx.arc(e.x + e.size/2, e.y + e.size/2, e.size/2 + 6, 0, Math.PI*2);
+    ctx.fill();
+    // hp bar
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(e.x, e.y - 8, e.size, 6);
+    ctx.fillStyle = '#4cd964';
+    const hpFrac = Math.max(0, e.hp / e.maxHp);
+    ctx.fillRect(e.x, e.y - 8, e.size * hpFrac, 6);
+    ctx.restore();
+  }
+
+  // Laser (solid yellow line from cat center towards mouse)
+  if(laserActive){
+    const ax = catX + 32, ay = catY + 26;
+    const dx = mouseX - ax, dy = mouseY - ay;
+    const len = Math.hypot(dx,dy) || 1;
+    const nx = dx / len, ny = dy / len;
+    const bx = ax + nx * (W*1.4), by = ay + ny * (W*1.4);
+
+    // glow
+    ctx.lineWidth = 12;
+    ctx.strokeStyle = 'rgba(255,230,120,0.18)';
+    ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke();
+
+    // core
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#ffd94d';
+    ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke();
+
+    // small particles along beam
+    if(Math.random() < 0.3) {
+      const px = ax + nx * (Math.random()* (W*0.7));
+      const py = ay + ny * (Math.random()* (W*0.7));
+      particles.push({x:px,y:py,vx:0,vy:0,life:80,age:0,color:'#fff',r: Math.random()*1.6 + 0.6});
+    }
+  }
+
+  // draw particles
+  for(const p of particles){
+    ctx.globalAlpha = 1 - (p.age / p.life);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // draw explosions
+  for(const ex of explosions){
+    const t = ex.age / ex.life;
+    ctx.globalAlpha = 1 - t;
+    ctx.fillStyle = ex.color || '#ffb84d';
+    ctx.beginPath();
+    ctx.arc(ex.x, ex.y, ex.size * (0.6 + t*0.8), 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // HUD overlays: crosshair
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(mouseX, mouseY, 12, 0, Math.PI*2);
+  ctx.stroke();
+
+  // small aiming line from cat to cursor
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(200,200,200,0.08)';
+  ctx.beginPath(); ctx.moveTo(catX + 32, catY + 26); ctx.lineTo(mouseX, mouseY); ctx.stroke();
+
+  // small debug/info box
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(W-220, H-52, 200, 36);
+  ctx.fillStyle = '#fff';
+  ctx.font = '16px Arial';
+  ctx.fillText(`Nivel ${level} · Enemigos: ${enemies.length}`, W-210, H-32);
+}
+
+// Gameover
+function gameOver(){
+  running = false;
+  setTimeout(()=>{
+    try {
+      alert(`💔 La casita fue invadida.\nPuntaje final: ${Math.floor(score)}\nNivel alcanzado: ${level}`);
+    } catch(e){}
+    window.location.reload();
+  }, 60);
+}
+
+// Mouse and touch handlers
+canvas.addEventListener('mousemove', (e)=>{
+  const rect = canvas.getBoundingClientRect();
+  mouseX = (e.clientX - rect.left);
+  mouseY = (e.clientY - rect.top);
+});
+canvas.addEventListener('touchmove', (e)=>{
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const t = e.touches[0];
+  mouseX = (t.clientX - rect.left);
+  mouseY = (t.clientY - rect.top);
+}, {passive:false});
+
+// Laser activation
+let shootingPointer = false;
+shootBtn.addEventListener('mousedown', (e)=>{ laserActive = true; shootingPointer = true; e.preventDefault(); });
+window.addEventListener('mouseup', ()=>{ laserActive = false; shootingPointer = false; });
+shootBtn.addEventListener('touchstart', (e)=>{ laserActive = true; shootingPointer = true; e.preventDefault(); ensureAudio(); }, {passive:false});
+window.addEventListener('touchend', ()=>{ laserActive = false; shootingPointer = false; });
+
+// spacebar toggle
+window.addEventListener('keydown', (e)=>{
+  if(e.code === 'Space'){ laserActive = true; ensureAudio(); e.preventDefault(); }
+});
+window.addEventListener('keyup', (e)=>{
+  if(e.code === 'Space'){ laserActive = false; e.preventDefault(); }
+});
+
+// Main loop
+let lastTime = performance.now();
+let lastDifficultyTime = lastTime;
+let lastElapsed = lastTime;
+let lastComboTick = lastTime;
+
+function loop(now = performance.now()){
+  if(!running) return;
+  const dt = Math.min(60, now - lastTime) / 16; // normalized frame time
+  lastTime = now;
+
+  // spawn & timing
+  spawnController(now);
+
+  // update systems
+  if(laserActive) damageEnemiesWithLaser();
+  updateEnemies(dt);
+  updateParticles(dt);
+
+  // update combo timer
+  if(comboTimer > 0){
+    comboTimer -= (now - (lastComboTick || now));
+    lastComboTick = now;
+    if(comboTimer <= 0) { combo = Math.max(1, combo - 0.8); comboTimer = 0; }
+  }
+
+  updateHUD();
+
+  // draw
+  drawCity(dt);
+  drawScene(dt);
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// Initial periodic spawn fallback
+setTimeout(()=>{ spawnEnemy(); spawnEnemy(); }, 300);
+
+// Gentle wave on level up
+function gentleWave(){
+  for(let i=0;i<Math.min(6, level+2);i++){
+    setTimeout(()=>spawnEnemy(), i*220);
+  }
+}
+let prevLevel = level;
+setInterval(()=>{
+  if(level > prevLevel){
+    gentleWave();
+    prevLevel = level;
+  }
+}, 700);
+
+// Resume audio on first interaction
+function resumeAudioOnInteraction(){
+  if(audioCtx && audioCtx.state === 'suspended') {
+    try { audioCtx.resume(); } catch(e){}
+  }
+}
+window.addEventListener('pointerdown', resumeAudioOnInteraction);
+window.addEventListener('touchstart', resumeAudioOnInteraction);
+
+// Update HUD initial
+updateHUD();
+
+</script>
+</body>
+</html>
